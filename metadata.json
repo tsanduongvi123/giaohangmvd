@@ -1,0 +1,6 @@
+{
+  "name": "Express Logistics - Tra Cứu Vận Đơn Toàn Quốc",
+  "description": "Hệ thống kiểm tra mã vận đơn, hành trình bưu kiện và theo dõi chuyển phát nhanh trực tuyến bảo mật, tức thì.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
