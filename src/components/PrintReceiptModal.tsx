@@ -54,7 +54,7 @@ export const PrintReceiptModal: React.FC<PrintReceiptModalProps> = ({ shipment, 
                 <span className="font-bold text-slate-900 text-lg tracking-tight">LOGISTICS VIỆT NAM</span>
               </div>
               <p className="text-xs text-slate-600 mt-1">Dịch vụ chuyển phát hỏa tốc & bưu chính toàn quốc</p>
-              <p className="text-xs text-slate-500 font-mono">Hotline: 1900 0000 | www.expresslogistics.vn</p>
+              <p className="text-xs text-slate-500 font-mono">Hotline CSKH 24/7: 1900 6888 | www.expresslogistics.vn</p>
             </div>
             <div className="text-right">
               <div className="font-mono font-bold text-xl tracking-wider text-slate-900 bg-slate-100 px-3 py-1 rounded border border-slate-300">

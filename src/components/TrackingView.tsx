@@ -8,6 +8,8 @@ import {
   getServiceTypeLabel,
 } from '../utils/formatters';
 import { PrintReceiptModal } from './PrintReceiptModal';
+import { DeliveryMap } from './DeliveryMap';
+import { fetchShipmentsFromSupabase } from '../services/supabase';
 import {
   Search,
   Package,
@@ -35,6 +37,7 @@ import {
   HelpCircle,
   ChevronRight,
   Warehouse,
+  X,
 } from 'lucide-react';
 
 interface TrackingViewProps {
@@ -60,6 +63,7 @@ export const TrackingView: React.FC<TrackingViewProps> = ({
   const [copiedCode, setCopiedCode] = useState<boolean>(false);
   const [copiedLink, setCopiedLink] = useState<boolean>(false);
   const [showPrintModal, setShowPrintModal] = useState<boolean>(false);
+  const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
 
   useEffect(() => {
     if (initialTrackingCode) {
@@ -72,7 +76,7 @@ export const TrackingView: React.FC<TrackingViewProps> = ({
     }
   }, [initialTrackingCode, shipments]);
 
-  const handleSearch = (e?: React.FormEvent) => {
+  const handleSearch = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     const clean = searchInput.trim().toUpperCase().replace(/[\s-]/g, '');
     if (!clean) return;
@@ -85,13 +89,29 @@ export const TrackingView: React.FC<TrackingViewProps> = ({
       onCodeSearched(clean);
     }
 
+    try {
+      const cloudData = await fetchShipmentsFromSupabase();
+      if (cloudData && cloudData.length > 0) {
+        const foundCloud = cloudData.find(
+          (s) => s.trackingCode.toUpperCase().replace(/[\s-]/g, '') === clean
+        );
+        if (foundCloud) {
+          setActiveShipment(foundCloud);
+          setIsSearching(false);
+          return;
+        }
+      }
+    } catch {
+      // Fallback to local shipments if offline or Supabase not connected
+    }
+
     setTimeout(() => {
       const found = shipments.find(
         (s) => s.trackingCode.toUpperCase().replace(/[\s-]/g, '') === clean
       );
       setActiveShipment(found || null);
       setIsSearching(false);
-    }, 220);
+    }, 180);
   };
 
   const copyToClipboard = (text: string, type: 'code' | 'link') => {
@@ -138,7 +158,7 @@ export const TrackingView: React.FC<TrackingViewProps> = ({
           <div className="flex items-center gap-3 text-slate-400">
             <span className="flex items-center gap-1 text-slate-300">
               <Headphones className="w-3.5 h-3.5 text-orange-400" />
-              Tổng đài CSKH: <strong className="text-white ml-0.5 font-mono">1900 0000</strong>
+              Tổng đài CSKH: <strong className="text-white ml-0.5 font-mono">1900 6888</strong>
             </span>
           </div>
         </div>
@@ -165,7 +185,7 @@ export const TrackingView: React.FC<TrackingViewProps> = ({
           <div className="flex items-center gap-2">
             <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-orange-50 text-orange-700 font-bold text-xs sm:text-sm border border-orange-200">
               <Headphones className="w-4 h-4 text-orange-600" />
-              <span className="font-mono">1900 0000</span>
+              <span className="font-mono">1900 6888</span>
             </div>
           </div>
         </div>
@@ -186,7 +206,7 @@ export const TrackingView: React.FC<TrackingViewProps> = ({
             Nhập chính xác mã vận đơn để theo dõi hành trình di chuyển, người giao nhận và thời gian nhận hàng.
           </p>
 
-          {/* Clean Search Input (NO sample chips underneath) */}
+          {/* Clean Search Input */}
           <div className="bg-white p-2 sm:p-2.5 rounded-2xl shadow-xl max-w-2xl mx-auto text-slate-800">
             <form onSubmit={handleSearch} className="flex flex-col sm:flex-row items-stretch gap-2">
               <div className="relative flex-1">
@@ -195,16 +215,23 @@ export const TrackingView: React.FC<TrackingViewProps> = ({
                 </div>
                 <input
                   type="text"
+                  inputMode="text"
+                  autoCapitalize="characters"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  style={{ userSelect: 'text', WebkitUserSelect: 'text' }}
                   value={searchInput}
                   onChange={(e) => setSearchInput(e.target.value.toUpperCase())}
                   placeholder="Nhập mã vận đơn cần kiểm tra..."
-                  className="w-full pl-11 pr-10 py-3 bg-slate-50 focus:bg-white text-slate-900 font-mono font-bold text-base rounded-xl border border-slate-200 focus:outline-hidden focus:ring-2 focus:ring-orange-500 uppercase placeholder:normal-case placeholder:font-sans placeholder:font-normal placeholder:text-slate-400"
+                  className="w-full pl-11 pr-10 py-3 bg-slate-50 focus:bg-white text-slate-900 font-mono font-bold text-base rounded-xl border border-slate-200 focus:outline-hidden focus:ring-2 focus:ring-orange-500 uppercase placeholder:normal-case placeholder:font-sans placeholder:font-normal placeholder:text-slate-400 select-text"
+                  onContextMenu={(e) => e.stopPropagation()}
                 />
                 {searchInput && (
                   <button
                     type="button"
                     onClick={() => setSearchInput('')}
-                    className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600 text-lg font-bold"
+                    className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600 text-lg font-bold cursor-pointer"
+                    title="Xóa mã"
                   >
                     ×
                   </button>
@@ -297,7 +324,7 @@ export const TrackingView: React.FC<TrackingViewProps> = ({
             </p>
             <div className="inline-flex items-center gap-1.5 text-xs text-slate-500 bg-slate-100 px-3 py-1.5 rounded-lg">
               <Headphones className="w-3.5 h-3.5 text-orange-600" />
-              Cần hỗ trợ? Tổng đài CSKH: <strong className="text-slate-800 font-mono">1900 0000</strong>
+              Cần hỗ trợ? Tổng đài CSKH: <strong className="text-slate-800 font-mono">1900 6888</strong>
             </div>
           </div>
         )}
@@ -521,7 +548,10 @@ export const TrackingView: React.FC<TrackingViewProps> = ({
               </div>
             </div>
 
-            {/* 3. GRID 2 CỘT: NHẬT KÝ HÀNH TRÌNH & THÔNG TIN KIỆN HÀNG */}
+            {/* 3. BẢN ĐỒ ĐỊNH VỊ LIVE DELIVERY MAP */}
+            <DeliveryMap shipment={activeShipment} />
+
+            {/* 4. GRID 2 CỘT: NHẬT KÝ HÀNH TRÌNH & THÔNG TIN KIỆN HÀNG */}
             <div className="grid grid-cols-1 md:grid-cols-12 gap-5 items-start">
               {/* TIMELINE (Left 7 Columns) */}
               <div className="md:col-span-7 bg-white rounded-2xl shadow-md border border-slate-200 p-4 sm:p-6">
@@ -610,7 +640,32 @@ export const TrackingView: React.FC<TrackingViewProps> = ({
                     </h3>
                   </div>
 
-                  <div className="space-y-2.5 text-xs">
+                  <div className="space-y-3 text-xs">
+                    {/* PRODUCT IMAGE (NẾU CÓ ẢNH SẢN PHẨM) */}
+                    {activeShipment.productImage && (
+                      <div className="rounded-xl overflow-hidden border border-slate-200 bg-slate-50 relative group">
+                        <div className="relative h-44 w-full bg-slate-900 flex items-center justify-center overflow-hidden">
+                          <img
+                            src={activeShipment.productImage}
+                            alt={activeShipment.packageName}
+                            className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setPreviewImageUrl(activeShipment.productImage || null)}
+                            className="absolute bottom-2 right-2 px-2.5 py-1 rounded-lg bg-black/70 hover:bg-black/90 text-white text-[11px] font-semibold flex items-center gap-1 backdrop-blur-xs transition-colors"
+                          >
+                            <FileText className="w-3 h-3" />
+                            Phóng to ảnh
+                          </button>
+                        </div>
+                        <div className="p-2 bg-white flex items-center justify-between text-[11px] text-slate-600 border-t border-slate-100">
+                          <span className="font-medium">📷 Ảnh bưu phẩm người gửi đính kèm</span>
+                          <span className="text-emerald-600 font-bold">✓ Đã xác thực</span>
+                        </div>
+                      </div>
+                    )}
+
                     <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200">
                       <span className="text-[10px] text-slate-400 font-bold uppercase block">Tên mặt hàng:</span>
                       <strong className="text-slate-900 block mt-0.5 break-words">
@@ -963,6 +1018,42 @@ export const TrackingView: React.FC<TrackingViewProps> = ({
           shipment={activeShipment}
           onClose={() => setShowPrintModal(false)}
         />
+      )}
+
+      {/* Image Preview Lightbox Modal */}
+      {previewImageUrl && (
+        <div
+          onClick={() => setPreviewImageUrl(null)}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white rounded-2xl overflow-hidden shadow-2xl max-w-2xl w-full relative"
+          >
+            <div className="flex items-center justify-between p-3.5 bg-slate-900 text-white border-b border-slate-800">
+              <span className="font-bold text-xs flex items-center gap-1.5">
+                <FileText className="w-4 h-4 text-orange-500" />
+                Ảnh Bưu Phẩm / Hàng Hóa Thực Tế Khi Đóng Gói
+              </span>
+              <button
+                onClick={() => setPreviewImageUrl(null)}
+                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-2 bg-slate-950 flex items-center justify-center max-h-[75vh] overflow-hidden">
+              <img
+                src={previewImageUrl}
+                alt="Ảnh sản phẩm phóng to"
+                className="max-h-[70vh] w-auto object-contain rounded-lg shadow-md"
+              />
+            </div>
+            <div className="p-3 bg-slate-50 text-center text-xs text-slate-500 border-t border-slate-200">
+              Hình ảnh đối soát đóng gói do người gửi cung cấp khi bàn giao cho bưu cục
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

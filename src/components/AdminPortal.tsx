@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Shipment, ShipmentStatus, TimelineEvent, PaymentMethod, ServiceType } from '../types';
+import React, { useState, useEffect } from 'react';
+import { Shipment, ShipmentStatus, TimelineEvent, PaymentMethod, ServiceType, RouteHub } from '../types';
 import {
   formatCurrencyVND,
   formatWeight,
@@ -9,6 +9,16 @@ import {
   getPaymentMethodLabel,
   getServiceTypeLabel,
 } from '../utils/formatters';
+import { autoBuildRouteHubs, generateAutoTimelineEvent } from '../utils/geoHubs';
+import {
+  getSavedSupabaseConfig,
+  saveSupabaseConfig,
+  testSupabaseConnection,
+  upsertShipmentToSupabase,
+  deleteShipmentFromSupabase,
+  SUPABASE_SQL_HELPER,
+  fetchShipmentsFromSupabase,
+} from '../services/supabase';
 import {
   Lock,
   Package,
@@ -18,7 +28,6 @@ import {
   Filter,
   Edit3,
   Trash2,
-  CheckCircle,
   Clock,
   MapPin,
   ExternalLink,
@@ -34,6 +43,14 @@ import {
   ShieldCheck,
   Eye,
   Check,
+  Image as ImageIcon,
+  Database,
+  Upload,
+  Sparkles,
+  Navigation,
+  RefreshCw,
+  Copy,
+  CheckCircle,
 } from 'lucide-react';
 
 interface AdminPortalProps {
@@ -64,20 +81,27 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   // Modals
   const [isCreateModalOpen, setIsCreateModalOpen] = useState<boolean>(false);
   const [editingShipment, setEditingShipment] = useState<Shipment | null>(null);
-  const [quickMilestoneShipment, setQuickMilestoneShipment] = useState<Shipment | null>(null);
+  const [isSupabaseModalOpen, setIsSupabaseModalOpen] = useState<boolean>(false);
+
+  // Supabase Status State
+  const [supabaseConfig, setSupabaseConfig] = useState(getSavedSupabaseConfig);
+  const [supabaseStatusMsg, setSupabaseStatusMsg] = useState<string>('');
+  const [isTestingSupabase, setIsTestingSupabase] = useState<boolean>(false);
+  const [copiedSql, setCopiedSql] = useState<boolean>(false);
 
   // New Shipment Form State
   const initialNewShipment: Partial<Shipment> = {
     trackingCode: generateTrackingCode(),
     senderName: '',
-    senderPhone: '',
+    senderPhone: '0900 123 456',
     senderAddress: '',
     senderCity: 'TP. Hồ Chí Minh',
     receiverName: '',
-    receiverPhone: '',
+    receiverPhone: '0900 654 321',
     receiverAddress: '',
     receiverCity: 'Hà Nội',
     packageName: '',
+    productImage: 'https://images.unsplash.com/photo-1592750475338-74b7b21085ab?auto=format&fit=crop&w=600&q=80',
     weightKg: 1.0,
     dimensions: '25 x 15 x 10 cm',
     codAmount: 0,
@@ -89,13 +113,13 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   };
   const [newShipmentData, setNewShipmentData] = useState<Partial<Shipment>>(initialNewShipment);
 
-  // Quick milestone form state
+  // Quick milestone form state for edit modal
   const [milestoneLocation, setMilestoneLocation] = useState<string>('Kho Tổng Phân Loại SOC');
   const [milestoneStatus, setMilestoneStatus] = useState<ShipmentStatus>('IN_TRANSIT');
   const [milestoneTitle, setMilestoneTitle] = useState<string>('Đã nhập kho trung chuyển');
   const [milestoneDesc, setMilestoneDesc] = useState<string>('Kiện hàng đã qua máy quét phân loại và chuyển tiếp chặng tiếp theo.');
-  const [milestoneShipperName, setMilestoneShipperName] = useState<string>('');
-  const [milestoneShipperPhone, setMilestoneShipperPhone] = useState<string>('');
+  const [milestoneShipperName, setMilestoneShipperName] = useState<string>('Bưu tá Trần Văn Nam');
+  const [milestoneShipperPhone, setMilestoneShipperPhone] = useState<string>('0900 345 889');
 
   // Handle Login
   const handleLogin = (e: React.FormEvent) => {
@@ -115,43 +139,76 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     onGoToCustomerTracking();
   };
 
-  // Quick Status change from table dropdown
-  const handleQuickStatusChange = (shipmentId: string, newStatus: ShipmentStatus) => {
-    const updated = shipments.map((s) => {
-      if (s.id !== shipmentId) return s;
+  // Image Upload Handler (converts to Base64 data URL)
+  const handleImageFileUpload = (e: React.ChangeEvent<HTMLInputElement>, target: 'new' | 'edit') => {
+    const file = e.target.files?.[0];
+    if (!file) return;
 
-      const info = getStatusInfo(newStatus);
-      const newEvent: TimelineEvent = {
-        id: `ev-auto-${Date.now()}`,
-        timestamp: getCurrentDateTimeFormatted(),
-        location: s.currentStatus === 'OUT_FOR_DELIVERY' || newStatus === 'OUT_FOR_DELIVERY'
-          ? `Bưu cục phát ${s.receiverCity}`
-          : `Trạm trung chuyển liên tỉnh`,
-        status: newStatus,
-        title: `Cập nhật trạng thái: ${info.label}`,
-        description: info.description,
-      };
+    if (file.size > 2 * 1024 * 1024) {
+      alert('Vui lòng chọn ảnh có kích thước dưới 2MB!');
+      return;
+    }
 
-      return {
-        ...s,
-        currentStatus: newStatus,
-        timeline: [newEvent, ...s.timeline],
-      };
-    });
-
-    onSaveShipments(updated);
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const base64 = event.target?.result as string;
+      if (target === 'new') {
+        setNewShipmentData((prev) => ({ ...prev, productImage: base64 }));
+      } else if (editingShipment) {
+        setEditingShipment((prev) => (prev ? { ...prev, productImage: base64 } : null));
+      }
+    };
+    reader.readAsDataURL(file);
   };
 
-  // Delete shipment
-  const handleDeleteShipment = (id: string, code: string) => {
-    if (window.confirm(`Bạn có chắc chắn muốn xóa vĩnh viễn mã vận đơn ${code}?`)) {
+  // Quick Status change with Smart Automated Hub Engine & Supabase Sync
+  const handleQuickStatusChange = async (shipmentId: string, newStatus: ShipmentStatus) => {
+    const targetShipment = shipments.find((s) => s.id === shipmentId);
+    if (!targetShipment) return;
+
+    // Automatically generate realistic hub milestone based on addresses
+    const autoEvent = generateAutoTimelineEvent(
+      newStatus,
+      targetShipment.senderCity,
+      targetShipment.senderAddress,
+      targetShipment.receiverCity,
+      targetShipment.receiverAddress,
+      targetShipment.timeline[0]?.shipperName || 'Bưu tá phụ trách',
+      targetShipment.timeline[0]?.shipperPhone || '0900 345 889'
+    );
+
+    const autoHubs = autoBuildRouteHubs(
+      targetShipment.senderCity,
+      targetShipment.senderAddress,
+      targetShipment.receiverCity,
+      targetShipment.receiverAddress
+    );
+
+    const updatedShipment: Shipment = {
+      ...targetShipment,
+      currentStatus: newStatus,
+      timeline: [autoEvent, ...targetShipment.timeline],
+      autoRouteHubs: autoHubs,
+    };
+
+    const updatedList = shipments.map((s) => (s.id === shipmentId ? updatedShipment : s));
+    onSaveShipments(updatedList);
+
+    // Sync to Supabase in background
+    await upsertShipmentToSupabase(updatedShipment);
+  };
+
+  // Delete shipment with Supabase sync
+  const handleDeleteShipment = async (id: string, code: string) => {
+    if (window.confirm(`Bạn có chắc chắn muốn xóa vĩnh viễn mã vận đơn ${code}? (Hệ thống sẽ đồng bộ xóa sạch trên Supabase)`)) {
       const updated = shipments.filter((s) => s.id !== id);
       onSaveShipments(updated);
+      await deleteShipmentFromSupabase(id);
     }
   };
 
-  // Create new shipment
-  const handleCreateShipmentSubmit = (e: React.FormEvent) => {
+  // Create new shipment with Smart Hub Routing & Supabase sync
+  const handleCreateShipmentSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newShipmentData.trackingCode?.trim()) {
       alert('Vui lòng nhập hoặc tự động tạo mã vận đơn!');
@@ -167,69 +224,93 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     }
 
     const code = newShipmentData.trackingCode.trim().toUpperCase().replace(/[\s-]/g, '');
-    // Check duplicate
     if (shipments.some((s) => s.trackingCode.toUpperCase() === code)) {
       alert(`Mã vận đơn ${code} đã tồn tại trong hệ thống! Vui lòng chọn mã khác.`);
       return;
     }
 
-    const nowStr = getCurrentDateTimeFormatted();
     const status = newShipmentData.currentStatus || 'PENDING_PICKUP';
-    const info = getStatusInfo(status);
+    const senderCity = newShipmentData.senderCity || 'TP. Hồ Chí Minh';
+    const senderAddress = newShipmentData.senderAddress || '';
+    const receiverCity = newShipmentData.receiverCity || 'Hà Nội';
+    const receiverAddress = newShipmentData.receiverAddress || '';
 
-    const initialEvent: TimelineEvent = {
-      id: `ev-${Date.now()}`,
-      timestamp: nowStr,
-      location: `${newShipmentData.senderAddress}, ${newShipmentData.senderCity}`,
-      status: status,
-      title: info.label,
-      description: info.description,
-    };
+    // Smart Hub Route Generator
+    const autoHubs = autoBuildRouteHubs(senderCity, senderAddress, receiverCity, receiverAddress);
+    const initialEvent = generateAutoTimelineEvent(
+      status,
+      senderCity,
+      senderAddress,
+      receiverCity,
+      receiverAddress
+    );
 
     const newShipment: Shipment = {
       id: `ship-${Date.now()}`,
       trackingCode: code,
       senderName: newShipmentData.senderName || '',
-      senderPhone: newShipmentData.senderPhone || '',
-      senderAddress: newShipmentData.senderAddress || '',
-      senderCity: newShipmentData.senderCity || 'TP. Hồ Chí Minh',
+      senderPhone: newShipmentData.senderPhone || '0900 123 456',
+      senderAddress: senderAddress,
+      senderCity: senderCity,
       receiverName: newShipmentData.receiverName || '',
-      receiverPhone: newShipmentData.receiverPhone || '',
-      receiverAddress: newShipmentData.receiverAddress || '',
-      receiverCity: newShipmentData.receiverCity || 'Hà Nội',
+      receiverPhone: newShipmentData.receiverPhone || '0900 654 321',
+      receiverAddress: receiverAddress,
+      receiverCity: receiverCity,
       packageName: newShipmentData.packageName || 'Kiện hàng bưu phẩm tiêu chuẩn',
+      productImage: newShipmentData.productImage,
       weightKg: Number(newShipmentData.weightKg) || 1,
       dimensions: newShipmentData.dimensions || '20 x 15 x 10 cm',
       codAmount: Number(newShipmentData.codAmount) || 0,
-      shippingFee: Number(newShipmentData.shippingFee) || 30000,
+      shippingFee: Number(newShipmentData.shippingFee) || 35000,
       paymentMethod: (newShipmentData.paymentMethod as PaymentMethod) || 'NGUOI_NHAN_TRA',
       serviceType: (newShipmentData.serviceType as ServiceType) || 'CHUAN',
       currentStatus: status,
-      createdAt: nowStr,
+      createdAt: getCurrentDateTimeFormatted(),
       estimatedDelivery: newShipmentData.estimatedDelivery || 'Trong vòng 24h - 48h tới',
       notes: newShipmentData.notes || '',
       timeline: [initialEvent],
+      autoRouteHubs: autoHubs,
     };
 
-    onSaveShipments([newShipment, ...shipments]);
+    const updated = [newShipment, ...shipments];
+    onSaveShipments(updated);
     setIsCreateModalOpen(false);
     setNewShipmentData(initialNewShipment);
-    alert(`Đã tạo thành công mã vận đơn: ${code}!`);
+
+    // Sync to Supabase
+    await upsertShipmentToSupabase(newShipment);
+    alert(`Đã tạo thành công mã vận đơn: ${code} và tích hợp tuyến bưu cục tự động!`);
   };
 
-  // Save edited shipment
-  const handleEditShipmentSave = (e: React.FormEvent) => {
+  // Save edited shipment with Supabase sync
+  const handleEditShipmentSave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingShipment) return;
 
-    const updated = shipments.map((s) => (s.id === editingShipment.id ? editingShipment : s));
+    // Recalculate smart hubs if addresses changed
+    const autoHubs = autoBuildRouteHubs(
+      editingShipment.senderCity,
+      editingShipment.senderAddress,
+      editingShipment.receiverCity,
+      editingShipment.receiverAddress
+    );
+
+    const updatedShipment = {
+      ...editingShipment,
+      autoRouteHubs: autoHubs,
+    };
+
+    const updated = shipments.map((s) => (s.id === updatedShipment.id ? updatedShipment : s));
     onSaveShipments(updated);
     setEditingShipment(null);
-    alert('Đã cập nhật thông tin mã vận đơn thành công!');
+
+    // Sync to Supabase
+    await upsertShipmentToSupabase(updatedShipment);
+    alert('Đã cập nhật thông tin mã vận đơn và đồng bộ Supabase thành công!');
   };
 
-  // Add milestone to edited shipment
-  const handleAddMilestoneToEdited = (e: React.FormEvent) => {
+  // Add custom milestone to edited shipment
+  const handleAddMilestoneToEdited = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingShipment) return;
 
@@ -251,21 +332,15 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     };
 
     setEditingShipment(updated);
-    // Also save to all
     const allUpdated = shipments.map((s) => (s.id === updated.id ? updated : s));
     onSaveShipments(allUpdated);
 
-    // Reset inputs
-    setMilestoneTitle('Đã nhập kho trung chuyển');
-    setMilestoneLocation('Kho Tổng Phân Loại SOC');
-    setMilestoneDesc('Kiện hàng đã cập bến và đang điều phối.');
-    setMilestoneShipperName('');
-    setMilestoneShipperPhone('');
-    alert('Đã bổ sung mốc hành trình mới thành công!');
+    await upsertShipmentToSupabase(updated);
+    alert('Đã bổ sung mốc hành trình và đồng bộ Supabase!');
   };
 
   // Delete milestone from edited shipment
-  const handleDeleteMilestone = (evtId: string) => {
+  const handleDeleteMilestone = async (evtId: string) => {
     if (!editingShipment) return;
     if (window.confirm('Xóa mốc hành trình này?')) {
       const updatedTimeline = editingShipment.timeline.filter((e) => e.id !== evtId);
@@ -276,6 +351,41 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       setEditingShipment(updated);
       const allUpdated = shipments.map((s) => (s.id === updated.id ? updated : s));
       onSaveShipments(allUpdated);
+      await upsertShipmentToSupabase(updated);
+    }
+  };
+
+  // Supabase Connection Test
+  const handleTestSupabase = async () => {
+    setIsTestingSupabase(true);
+    saveSupabaseConfig(supabaseConfig);
+    const result = await testSupabaseConnection();
+    setSupabaseStatusMsg(result.message);
+    setIsTestingSupabase(false);
+  };
+
+  // Sync all local shipments to Supabase
+  const handleSyncAllToSupabase = async () => {
+    setIsTestingSupabase(true);
+    let successCount = 0;
+    for (const ship of shipments) {
+      const ok = await upsertShipmentToSupabase(ship);
+      if (ok) successCount++;
+    }
+    setIsTestingSupabase(false);
+    alert(`Đã đồng bộ ${successCount}/${shipments.length} vận đơn lên cơ sở dữ liệu Supabase!`);
+  };
+
+  // Pull data from Supabase
+  const handlePullFromSupabase = async () => {
+    setIsTestingSupabase(true);
+    const cloudData = await fetchShipmentsFromSupabase();
+    setIsTestingSupabase(false);
+    if (cloudData && cloudData.length > 0) {
+      onSaveShipments(cloudData);
+      alert(`Đã tải về thành công ${cloudData.length} vận đơn từ Supabase!`);
+    } else {
+      alert('Không tìm thấy dữ liệu trên Supabase hoặc bảng rỗng.');
     }
   };
 
@@ -285,8 +395,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       s.trackingCode.toLowerCase().includes(searchQuery.toLowerCase()) ||
       s.senderName.toLowerCase().includes(searchQuery.toLowerCase()) ||
       s.receiverName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      s.senderPhone.includes(searchQuery) ||
-      s.receiverPhone.includes(searchQuery) ||
+      s.packageName.toLowerCase().includes(searchQuery.toLowerCase()) ||
       s.senderAddress.toLowerCase().includes(searchQuery.toLowerCase()) ||
       s.receiverAddress.toLowerCase().includes(searchQuery.toLowerCase());
 
@@ -294,18 +403,18 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     return matchesSearch && matchesStatus;
   });
 
-  // Stats calculation
-  const totalShipments = shipments.length;
-  const inTransitCount = shipments.filter((s) => s.currentStatus === 'IN_TRANSIT').length;
-  const outForDeliveryCount = shipments.filter((s) => s.currentStatus === 'OUT_FOR_DELIVERY').length;
-  const deliveredCount = shipments.filter((s) => s.currentStatus === 'DELIVERED').length;
-  const pendingPickupCount = shipments.filter((s) => s.currentStatus === 'PENDING_PICKUP').length;
-  const totalCodAmount = shipments.reduce((sum, s) => sum + (s.codAmount || 0), 0);
+  // Calculate live route preview for New Shipment modal
+  const previewNewHubs = autoBuildRouteHubs(
+    newShipmentData.senderCity || 'TP. Hồ Chí Minh',
+    newShipmentData.senderAddress || '',
+    newShipmentData.receiverCity || 'Hà Nội',
+    newShipmentData.receiverAddress || ''
+  );
 
   // ===================== LOGIN SCREEN =====================
   if (!isAuthenticated) {
     return (
-      <div className="min-h-screen bg-linear-to-br from-slate-900 via-slate-800 to-slate-950 flex flex-col justify-center items-center px-4 font-sans relative">
+      <div className="min-h-screen bg-slate-950 flex flex-col justify-center items-center px-4 font-sans relative">
         <div className="w-full max-w-md bg-white rounded-3xl shadow-2xl p-8 border border-slate-700/30 relative z-10">
           <div className="text-center mb-8">
             <div className="w-16 h-16 rounded-2xl bg-orange-600 text-white flex items-center justify-center mx-auto mb-4 shadow-xl shadow-orange-600/30">
@@ -318,7 +427,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
               Hệ Thống Vận Hành Express Logistics
             </p>
             <p className="text-slate-500 text-xs mt-2">
-              Khu vực bảo mật dành riêng cho ban quản lý và điều phối viên
+              Khu vực bảo mật dành riêng cho quản trị viên
             </p>
           </div>
 
@@ -370,7 +479,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
             <button
               type="submit"
-              className="w-full py-3 bg-linear-to-r from-orange-600 to-amber-600 hover:from-orange-500 hover:to-amber-500 text-white font-bold rounded-xl shadow-lg shadow-orange-600/30 transition-all text-sm cursor-pointer mt-2"
+              className="w-full py-3 bg-orange-600 hover:bg-orange-700 text-white font-bold rounded-xl shadow-lg transition-all text-sm cursor-pointer mt-2"
             >
               ĐĂNG NHẬP QUẢN TRỊ
             </button>
@@ -396,38 +505,43 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       <header className="bg-slate-900 text-white border-b border-slate-800 sticky top-0 z-30 shadow-md">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-orange-600 flex items-center justify-center font-bold text-white shadow-md shadow-orange-600/30">
+            <div className="w-9 h-9 rounded-xl bg-orange-600 flex items-center justify-center font-bold text-white shadow-md">
               <Truck className="w-5 h-5" />
             </div>
             <div>
               <div className="flex items-center gap-2">
                 <span className="font-extrabold text-lg tracking-tight">EXPRESS ADMIN</span>
-                <span className="text-[10px] bg-orange-500/20 text-orange-400 font-mono px-2 py-0.5 rounded-full border border-orange-500/30">
-                  PORTAL QUẢN TRỊ
+                <span className="text-[10px] bg-emerald-500/20 text-emerald-400 font-mono px-2 py-0.5 rounded-full border border-emerald-500/30 flex items-center gap-1">
+                  <Database className="w-3 h-3" />
+                  Supabase Ready
                 </span>
               </div>
-              <p className="text-[11px] text-slate-400">Điều phối hành trình & Quản lý toàn bộ mã vận đơn</p>
+              <p className="text-[11px] text-slate-400">Tự động tích hợp bưu cục trên bản đồ & đồng bộ cơ sở dữ liệu</p>
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
-            <div className="hidden sm:flex items-center gap-2 bg-slate-800 px-3 py-1.5 rounded-xl border border-slate-700 text-xs">
-              <span className="w-2 h-2 rounded-full bg-emerald-400" />
-              <span className="text-slate-300 font-mono">tsanduongvi123</span>
-              <span className="text-slate-500">(Admin)</span>
-            </div>
+          <div className="flex items-center gap-2.5">
+            {/* Supabase Config Trigger */}
+            <button
+              onClick={() => setIsSupabaseModalOpen(true)}
+              className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-emerald-400 text-xs font-semibold rounded-xl border border-emerald-500/40 transition-colors flex items-center gap-1.5"
+              title="Quản lý kết nối cơ sở dữ liệu Supabase"
+            >
+              <Database className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Cơ Sở Dữ Liệu</span> Supabase
+            </button>
 
             <button
               onClick={() => onGoToCustomerTracking()}
-              className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-xl border border-slate-700 transition-colors flex items-center gap-1.5 cursor-pointer"
+              className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-xl border border-slate-700 transition-colors flex items-center gap-1.5"
             >
               <Eye className="w-3.5 h-3.5 text-orange-400" />
-              <span className="hidden sm:inline">Xem trang</span> Khách hàng
+              <span className="hidden sm:inline">Xem trang</span> Khách
             </button>
 
             <button
               onClick={handleLogout}
-              className="px-3 py-1.5 bg-rose-900/60 hover:bg-rose-800 text-rose-200 text-xs font-semibold rounded-xl border border-rose-700/60 transition-colors flex items-center gap-1.5 cursor-pointer"
+              className="px-3 py-1.5 bg-rose-900/60 hover:bg-rose-800 text-rose-200 text-xs font-semibold rounded-xl border border-rose-700/60 transition-colors flex items-center gap-1.5"
             >
               <LogOut className="w-3.5 h-3.5" />
               Đăng xuất
@@ -437,51 +551,39 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       </header>
 
       {/* Main Container */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
-        {/* KPI Stats Cards */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 sm:gap-4">
-          <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs">
-            <span className="text-xs text-slate-500 font-bold uppercase block">Tổng vận đơn</span>
-            <span className="text-2xl font-black text-slate-900 mt-1 block font-mono">{totalShipments}</span>
-            <span className="text-[11px] text-slate-400">Tất cả hồ sơ</span>
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-5">
+        {/* Smart Engine Announcement Banner */}
+        <div className="bg-linear-to-r from-orange-500/10 via-amber-500/10 to-blue-500/10 border border-orange-200 rounded-2xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-orange-600 text-white flex items-center justify-center shrink-0">
+              <Sparkles className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="font-extrabold text-sm text-slate-900">
+                Tính Năng Tự Động Định Vị Bản Đồ & Gắn Ảnh Sản Phẩm Đã Bật!
+              </h3>
+              <p className="text-xs text-slate-600">
+                Khi nhập địa chỉ gửi & nhận, hệ thống tự động dò bưu cục và kho SOC. Admin chỉ cần bấm đổi trạng thái là hệ thống tự điền trạm và mốc hành trình tương ứng.
+              </p>
+            </div>
           </div>
-
-          <div className="bg-white p-4 rounded-2xl border border-orange-200 shadow-xs bg-orange-50/20">
-            <span className="text-xs text-orange-700 font-bold uppercase block">Đang giao hàng</span>
-            <span className="text-2xl font-black text-orange-600 mt-1 block font-mono">{outForDeliveryCount}</span>
-            <span className="text-[11px] text-orange-600">Bưu tá đang phát</span>
-          </div>
-
-          <div className="bg-white p-4 rounded-2xl border border-indigo-200 shadow-xs bg-indigo-50/20">
-            <span className="text-xs text-indigo-700 font-bold uppercase block">Đang trung chuyển</span>
-            <span className="text-2xl font-black text-indigo-600 mt-1 block font-mono">{inTransitCount}</span>
-            <span className="text-[11px] text-indigo-600">Tại các kho SOC</span>
-          </div>
-
-          <div className="bg-white p-4 rounded-2xl border border-emerald-200 shadow-xs bg-emerald-50/20">
-            <span className="text-xs text-emerald-700 font-bold uppercase block">Đã giao thành công</span>
-            <span className="text-2xl font-black text-emerald-600 mt-1 block font-mono">{deliveredCount}</span>
-            <span className="text-[11px] text-emerald-600">Hoàn tất nhận hàng</span>
-          </div>
-
-          <div className="bg-white p-4 rounded-2xl border border-amber-200 shadow-xs bg-amber-50/20">
-            <span className="text-xs text-amber-700 font-bold uppercase block">Chờ lấy hàng</span>
-            <span className="text-2xl font-black text-amber-600 mt-1 block font-mono">{pendingPickupCount}</span>
-            <span className="text-[11px] text-amber-600">Tại shop người gửi</span>
-          </div>
-
-          <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs">
-            <span className="text-xs text-slate-500 font-bold uppercase block">Tổng tiền COD</span>
-            <span className="text-lg font-black text-slate-900 mt-1 block font-mono truncate">
-              {formatCurrencyVND(totalCodAmount)}
-            </span>
-            <span className="text-[11px] text-slate-400">Đang luân chuyển</span>
-          </div>
+          <button
+            onClick={() => {
+              setNewShipmentData({
+                ...initialNewShipment,
+                trackingCode: generateTrackingCode(),
+              });
+              setIsCreateModalOpen(true);
+            }}
+            className="px-4 py-2 bg-orange-600 hover:bg-orange-700 text-white font-bold text-xs rounded-xl shadow-sm transition-colors flex items-center gap-1.5 shrink-0"
+          >
+            <Plus className="w-4 h-4 stroke-[3]" />
+            Tạo Mã Vận Đơn Mới
+          </button>
         </div>
 
-        {/* Toolbar & Action Header */}
-        <div className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 shadow-xs flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4">
-          {/* Search box & filter */}
+        {/* Toolbar & Filter */}
+        <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-xs flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
           <div className="flex flex-1 flex-col sm:flex-row items-stretch sm:items-center gap-3">
             <div className="relative flex-1">
               <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
@@ -491,8 +593,8 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Tìm mã vận đơn, người gửi, người nhận, địa chỉ..."
-                className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-sm focus:bg-white focus:ring-2 focus:ring-orange-500 focus:outline-hidden"
+                placeholder="Tìm mã vận đơn, người gửi, người nhận, tên hàng hóa..."
+                className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs sm:text-sm focus:bg-white focus:ring-2 focus:ring-orange-500 focus:outline-hidden"
               />
             </div>
 
@@ -516,22 +618,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
             </div>
           </div>
 
-          {/* Action buttons */}
-          <div className="flex items-center gap-2.5 shrink-0">
-            <button
-              onClick={() => {
-                setNewShipmentData({
-                  ...initialNewShipment,
-                  trackingCode: generateTrackingCode(),
-                });
-                setIsCreateModalOpen(true);
-              }}
-              className="px-4 py-2 bg-orange-600 hover:bg-orange-700 text-white rounded-xl text-sm font-bold flex items-center gap-2 shadow-sm transition-colors cursor-pointer"
-            >
-              <Plus className="w-4 h-4 stroke-[3]" />
-              Tạo Mã Vận Đơn Mới
-            </button>
-
+          <div className="flex items-center gap-2 shrink-0">
             <button
               onClick={() => {
                 if (window.confirm('Khôi phục danh sách vận đơn ban đầu với các mẫu dữ liệu thực tế?')) {
@@ -553,7 +640,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
               Danh Sách Vận Đơn Quản Trị ({filteredShipments.length})
             </h2>
             <span className="text-xs text-slate-500">
-              Nhấp vào mã đơn để xem trang khách hoặc chỉnh sửa chi tiết
+              Thay đổi trạng thái tại menu thả xuống sẽ tự động cập nhật trạm bưu cục & bản đồ
             </span>
           </div>
 
@@ -561,42 +648,54 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
             <div className="p-12 text-center text-slate-500">
               <Package className="w-12 h-12 text-slate-300 mx-auto mb-3" />
               <p className="font-bold text-slate-700">Không tìm thấy mã vận đơn nào phù hợp!</p>
-              <p className="text-xs text-slate-400 mt-1">Thử thay đổi từ khóa tìm kiếm hoặc bấm &quot;Tạo Mã Vận Đơn Mới&quot;.</p>
             </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse text-xs">
                 <thead>
                   <tr className="bg-slate-100/70 border-b border-slate-200 text-slate-600 font-bold uppercase text-[11px] tracking-wider">
-                    <th className="py-3 px-4">Mã Vận Đơn</th>
+                    <th className="py-3 px-4">Ảnh & Mã Đơn</th>
                     <th className="py-3 px-4">Từ Địa Chỉ (Gửi)</th>
                     <th className="py-3 px-4">Giao Đến Địa Chỉ (Nhận)</th>
                     <th className="py-3 px-4">Hàng Hóa & COD</th>
-                    <th className="py-3 px-4">Trạng Thái Hiện Tại</th>
-                    <th className="py-3 px-4">Hành Trình</th>
+                    <th className="py-3 px-4">Cập Nhật Trạng Thái Tự Động</th>
                     <th className="py-3 px-4 text-right">Thao Tác</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {filteredShipments.map((s) => {
                     const statusInfo = getStatusInfo(s.currentStatus);
-                    const serviceInfo = getServiceTypeLabel(s.serviceType);
 
                     return (
                       <tr key={s.id} className="hover:bg-slate-50/80 transition-colors">
-                        {/* Tracking Code */}
+                        {/* Image & Tracking Code */}
                         <td className="py-3.5 px-4 font-mono">
-                          <button
-                            onClick={() => onGoToCustomerTracking(s.trackingCode)}
-                            className="font-bold text-orange-600 hover:text-orange-800 hover:underline flex items-center gap-1 text-sm"
-                            title="Mở kiểm tra trên giao diện khách"
-                          >
-                            {s.trackingCode}
-                            <ExternalLink className="w-3 h-3 text-slate-400" />
-                          </button>
-                          <span className="inline-block mt-0.5 text-[10px] text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded font-sans font-medium">
-                            {serviceInfo.tag}
-                          </span>
+                          <div className="flex items-center gap-2.5">
+                            {s.productImage ? (
+                              <img
+                                src={s.productImage}
+                                alt={s.packageName}
+                                className="w-10 h-10 rounded-lg object-cover border border-slate-200 shrink-0"
+                              />
+                            ) : (
+                              <div className="w-10 h-10 rounded-lg bg-slate-100 border border-slate-200 flex items-center justify-center text-slate-400 shrink-0">
+                                <Package className="w-5 h-5" />
+                              </div>
+                            )}
+                            <div>
+                              <button
+                                onClick={() => onGoToCustomerTracking(s.trackingCode)}
+                                className="font-bold text-orange-600 hover:text-orange-800 hover:underline flex items-center gap-1 text-sm"
+                                title="Mở kiểm tra trên giao diện khách"
+                              >
+                                {s.trackingCode}
+                                <ExternalLink className="w-3 h-3 text-slate-400" />
+                              </button>
+                              <span className="text-[10px] text-slate-400 font-sans block">
+                                {s.createdAt.split(' ')[0]}
+                              </span>
+                            </div>
+                          </div>
                         </td>
 
                         {/* Sender */}
@@ -619,18 +718,18 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
                         {/* Package specs */}
                         <td className="py-3.5 px-4">
-                          <div className="font-semibold text-slate-800 truncate max-w-[180px]" title={s.packageName}>
+                          <div className="font-semibold text-slate-800 truncate max-w-[170px]" title={s.packageName}>
                             {s.packageName}
                           </div>
                           <div className="text-[11px] text-slate-500">
-                            {formatWeight(s.weightKg)} • {s.dimensions || 'Chuẩn'}
+                            {formatWeight(s.weightKg)}
                           </div>
                           <div className="text-xs font-bold text-orange-700 mt-0.5">
                             {s.codAmount > 0 ? `COD: ${formatCurrencyVND(s.codAmount)}` : 'Không COD'}
                           </div>
                         </td>
 
-                        {/* Quick Status Dropdown */}
+                        {/* Quick Status Dropdown (Trạng thái tự động gắn bưu cục) */}
                         <td className="py-3.5 px-4">
                           <select
                             value={s.currentStatus}
@@ -646,15 +745,8 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                             <option value="RETURNED">Đang chuyển hoàn</option>
                             <option value="CANCELLED">Đã hủy đơn</option>
                           </select>
-                        </td>
-
-                        {/* Timeline snippet */}
-                        <td className="py-3.5 px-4 text-slate-500 text-[11px]">
-                          <span className="font-semibold text-slate-700 block">
-                            {s.timeline.length} trạm ghi nhận
-                          </span>
-                          <span className="truncate block max-w-[150px] text-[10px] text-slate-400">
-                            Gần nhất: {s.timeline[0]?.title || 'Mới tạo'}
+                          <span className="text-[10px] text-slate-400 block mt-1">
+                            📍 {s.timeline[0]?.location ? s.timeline[0].location.split(',')[0] : 'Đang điều phối'}
                           </span>
                         </td>
 
@@ -664,7 +756,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                             <button
                               onClick={() => setEditingShipment(s)}
                               className="p-1.5 rounded-lg bg-slate-100 hover:bg-orange-100 hover:text-orange-700 text-slate-700 transition-colors"
-                              title="Chỉnh sửa toàn bộ thông tin"
+                              title="Chỉnh sửa toàn bộ thông tin & ảnh"
                             >
                               <Edit3 className="w-4 h-4" />
                             </button>
@@ -680,7 +772,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                             <button
                               onClick={() => handleDeleteShipment(s.id, s.trackingCode)}
                               className="p-1.5 rounded-lg bg-slate-100 hover:bg-rose-100 hover:text-rose-700 text-slate-700 transition-colors"
-                              title="Xóa mã vận đơn này"
+                              title="Xóa mã vận đơn này (Đồng bộ xóa Supabase)"
                             >
                               <Trash2 className="w-4 h-4" />
                             </button>
@@ -696,10 +788,10 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         </div>
       </div>
 
-      {/* ===================== MODAL: TẠO MÃ VẬN ĐƠN MỚI ===================== */}
+      {/* ===================== MODAL: TẠO MÃ VẬN ĐƠN MỚI (CÓ ẢNH & AUTO BƯU CỤC) ===================== */}
       {isCreateModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 overflow-y-auto">
-          <div className="bg-white rounded-3xl shadow-2xl max-w-3xl w-full p-6 md:p-8 my-8 relative">
+          <div className="bg-white rounded-3xl shadow-2xl max-w-3xl w-full p-6 md:p-8 my-8 relative max-h-[92vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-4 border-b border-slate-100">
               <div className="flex items-center gap-2">
                 <div className="w-8 h-8 rounded-xl bg-orange-600 text-white flex items-center justify-center font-bold">
@@ -707,7 +799,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                 </div>
                 <div>
                   <h3 className="font-extrabold text-slate-900 text-lg">Tạo Mã Vận Đơn Mới</h3>
-                  <p className="text-xs text-slate-500">Khách hàng có thể dùng mã này để tra cứu ngay sau khi tạo</p>
+                  <p className="text-xs text-slate-500">Tự động gắn bưu cục trên bản đồ & đồng bộ Supabase</p>
                 </div>
               </div>
               <button
@@ -718,10 +810,10 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
               </button>
             </div>
 
-            <form onSubmit={handleCreateShipmentSubmit} className="mt-5 space-y-5 text-xs">
+            <form onSubmit={handleCreateShipmentSubmit} className="mt-5 space-y-4 text-xs">
               {/* Tracking Code and Service Type */}
-              <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label className="block font-bold text-slate-700 uppercase mb-1">
                       Mã Vận Đơn (Tracking Code) *
@@ -779,166 +871,260 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
               </div>
 
               {/* SENDER INFO (TỪ ĐỊA CHỈ...) */}
-              <div className="border border-blue-200 bg-blue-50/40 p-4 rounded-2xl">
-                <span className="font-bold text-blue-900 text-sm uppercase flex items-center gap-1.5 mb-3">
-                  <MapPin className="w-4 h-4 text-blue-600" />
+              <div className="border border-blue-200 bg-blue-50/40 p-3.5 rounded-2xl">
+                <span className="font-bold text-blue-900 text-xs uppercase flex items-center gap-1.5 mb-2.5">
+                  <MapPin className="w-3.5 h-3.5 text-blue-600" />
                   1. Thông Tin Người Gửi (Từ Địa Chỉ...)
                 </span>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                   <div>
-                    <label className="block font-semibold text-slate-700 mb-1">Họ tên người gửi *</label>
+                    <label className="block font-semibold text-slate-700 mb-0.5">Họ tên người gửi *</label>
                     <input
                       type="text"
                       required
                       value={newShipmentData.senderName}
                       onChange={(e) => setNewShipmentData({ ...newShipmentData, senderName: e.target.value })}
                       placeholder="VD: Cửa Hàng Thời Trang Anna"
-                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-orange-500 focus:outline-hidden"
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs"
                     />
                   </div>
                   <div>
-                    <label className="block font-semibold text-slate-700 mb-1">Số điện thoại người gửi *</label>
+                    <label className="block font-semibold text-slate-700 mb-0.5">Số điện thoại gửi *</label>
                     <input
                       type="text"
                       required
                       value={newShipmentData.senderPhone}
                       onChange={(e) => setNewShipmentData({ ...newShipmentData, senderPhone: e.target.value })}
-                      placeholder="VD: 0988 123 456"
-                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-orange-500 focus:outline-hidden"
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-mono"
                     />
                   </div>
-                  <div className="sm:col-span-2">
-                    <label className="block font-semibold text-slate-700 mb-1">Địa chỉ gửi chi tiết (Từ địa chỉ) *</label>
-                    <input
-                      type="text"
-                      required
-                      value={newShipmentData.senderAddress}
-                      onChange={(e) => setNewShipmentData({ ...newShipmentData, senderAddress: e.target.value })}
-                      placeholder="VD: Số 12 Đường Hoa Phượng, Phường 2, Quận Phú Nhuận"
-                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-orange-500 focus:outline-hidden"
-                    />
-                  </div>
-                  <div className="sm:col-span-2">
-                    <label className="block font-semibold text-slate-700 mb-1">Tỉnh / Thành phố gửi *</label>
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-0.5">Tỉnh / Thành phố gửi *</label>
                     <input
                       type="text"
                       required
                       value={newShipmentData.senderCity}
                       onChange={(e) => setNewShipmentData({ ...newShipmentData, senderCity: e.target.value })}
                       placeholder="VD: TP. Hồ Chí Minh"
-                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-orange-500 focus:outline-hidden"
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-0.5">Địa chỉ gửi chi tiết (Từ địa chỉ) *</label>
+                    <input
+                      type="text"
+                      required
+                      value={newShipmentData.senderAddress}
+                      onChange={(e) => setNewShipmentData({ ...newShipmentData, senderAddress: e.target.value })}
+                      placeholder="VD: 02 Hải Triều, P. Bến Nghé, Quận 1"
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs"
                     />
                   </div>
                 </div>
               </div>
 
               {/* RECEIVER INFO (GIAO ĐẾN ĐỊA CHỈ...) */}
-              <div className="border border-orange-200 bg-orange-50/40 p-4 rounded-2xl">
-                <span className="font-bold text-orange-900 text-sm uppercase flex items-center gap-1.5 mb-3">
-                  <MapPin className="w-4 h-4 text-orange-600" />
+              <div className="border border-orange-200 bg-orange-50/40 p-3.5 rounded-2xl">
+                <span className="font-bold text-orange-900 text-xs uppercase flex items-center gap-1.5 mb-2.5">
+                  <MapPin className="w-3.5 h-3.5 text-orange-600" />
                   2. Thông Tin Người Nhận (Giao Đến Địa Chỉ...)
                 </span>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                   <div>
-                    <label className="block font-semibold text-slate-700 mb-1">Họ tên người nhận *</label>
+                    <label className="block font-semibold text-slate-700 mb-0.5">Họ tên người nhận *</label>
                     <input
                       type="text"
                       required
                       value={newShipmentData.receiverName}
                       onChange={(e) => setNewShipmentData({ ...newShipmentData, receiverName: e.target.value })}
-                      placeholder="VD: Nguyễn Văn A"
-                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-orange-500 focus:outline-hidden"
+                      placeholder="VD: Anh Hoàng Long"
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs"
                     />
                   </div>
                   <div>
-                    <label className="block font-semibold text-slate-700 mb-1">Số điện thoại người nhận *</label>
+                    <label className="block font-semibold text-slate-700 mb-0.5">Số điện thoại nhận *</label>
                     <input
                       type="text"
                       required
                       value={newShipmentData.receiverPhone}
                       onChange={(e) => setNewShipmentData({ ...newShipmentData, receiverPhone: e.target.value })}
-                      placeholder="VD: 0912 345 678"
-                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-orange-500 focus:outline-hidden"
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-mono"
                     />
                   </div>
-                  <div className="sm:col-span-2">
-                    <label className="block font-semibold text-slate-700 mb-1">Địa chỉ giao chi tiết (Giao đến địa chỉ) *</label>
-                    <input
-                      type="text"
-                      required
-                      value={newShipmentData.receiverAddress}
-                      onChange={(e) => setNewShipmentData({ ...newShipmentData, receiverAddress: e.target.value })}
-                      placeholder="VD: Căn hộ 502 Tòa Landmark 81, 720A Điện Biên Phủ, Phường 22, Quận Bình Thạnh"
-                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-orange-500 focus:outline-hidden"
-                    />
-                  </div>
-                  <div className="sm:col-span-2">
-                    <label className="block font-semibold text-slate-700 mb-1">Tỉnh / Thành phố nhận *</label>
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-0.5">Tỉnh / Thành phố nhận *</label>
                     <input
                       type="text"
                       required
                       value={newShipmentData.receiverCity}
                       onChange={(e) => setNewShipmentData({ ...newShipmentData, receiverCity: e.target.value })}
-                      placeholder="VD: TP. Hồ Chí Minh"
-                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-orange-500 focus:outline-hidden"
+                      placeholder="VD: Hà Nội"
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-0.5">Địa chỉ giao chi tiết (Giao đến địa chỉ) *</label>
+                    <input
+                      type="text"
+                      required
+                      value={newShipmentData.receiverAddress}
+                      onChange={(e) => setNewShipmentData({ ...newShipmentData, receiverAddress: e.target.value })}
+                      placeholder="VD: 48 Ngõ 165 Cầu Giấy, P. Dịch Vọng"
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs"
                     />
                   </div>
                 </div>
               </div>
 
-              {/* PACKAGE & CHARGES */}
-              <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200">
-                <span className="font-bold text-slate-800 text-sm uppercase flex items-center gap-1.5 mb-3">
-                  <Package className="w-4 h-4 text-slate-600" />
-                  3. Thông Tin Hàng Hóa & Cước Phí
+              {/* AUTOMATIC POSTAL HUB DETECTION BADGE */}
+              <div className="p-3 bg-slate-900 text-slate-200 rounded-xl border border-slate-800">
+                <span className="font-bold text-[11px] text-orange-400 uppercase flex items-center gap-1 mb-1">
+                  <Navigation className="w-3.5 h-3.5" />
+                  Hệ thống tự động phát hiện trạm bưu cục theo địa chỉ:
                 </span>
+                <p className="text-[11px] text-slate-300">
+                  {previewNewHubs.map((h, i) => (
+                    <span key={i}>
+                      {h.name} {i < previewNewHubs.length - 1 ? '➔ ' : ''}
+                    </span>
+                  ))}
+                </p>
+              </div>
+
+              {/* PRODUCT IMAGE UPLOAD / PRESET */}
+              <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200">
+                <span className="font-bold text-slate-800 text-xs uppercase flex items-center gap-1.5 mb-2.5">
+                  <ImageIcon className="w-4 h-4 text-orange-600" />
+                  Ảnh Sản Phẩm / Bưu Kiện Khi Gửi
+                </span>
+
+                <div className="flex flex-col sm:flex-row items-center gap-4">
+                  {newShipmentData.productImage ? (
+                    <div className="relative w-24 h-24 rounded-xl overflow-hidden border-2 border-orange-500 shrink-0">
+                      <img
+                        src={newShipmentData.productImage}
+                        alt="Product preview"
+                        className="w-full h-full object-cover"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setNewShipmentData({ ...newShipmentData, productImage: '' })}
+                        className="absolute top-1 right-1 p-1 rounded-full bg-black/70 text-white hover:bg-rose-600 transition-colors"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="w-24 h-24 rounded-xl border-2 border-dashed border-slate-300 flex flex-col items-center justify-center text-slate-400 shrink-0 bg-white">
+                      <ImageIcon className="w-6 h-6 mb-1" />
+                      <span className="text-[10px]">Chưa có ảnh</span>
+                    </div>
+                  )}
+
+                  <div className="flex-1 space-y-2 w-full">
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                        Tải ảnh từ thiết bị (Điện thoại / Máy tính):
+                      </label>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={(e) => handleImageFileUpload(e, 'new')}
+                        className="w-full text-xs text-slate-500 file:mr-2 file:py-1.5 file:px-3 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-orange-50 file:text-orange-700 hover:file:bg-orange-100 cursor-pointer"
+                      />
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                      <span className="text-[10px] text-slate-400">Hoặc chọn mẫu nhanh:</span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setNewShipmentData({
+                            ...newShipmentData,
+                            productImage:
+                              'https://images.unsplash.com/photo-1592750475338-74b7b21085ab?auto=format&fit=crop&w=600&q=80',
+                          })
+                        }
+                        className="px-2 py-0.5 rounded bg-slate-200 text-slate-700 text-[10px] hover:bg-orange-100"
+                      >
+                        Điện thoại
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setNewShipmentData({
+                            ...newShipmentData,
+                            productImage:
+                              'https://images.unsplash.com/photo-1542291026-7eec264c27ff?auto=format&fit=crop&w=600&q=80',
+                          })
+                        }
+                        className="px-2 py-0.5 rounded bg-slate-200 text-slate-700 text-[10px] hover:bg-orange-100"
+                      >
+                        Giày Sneaker
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setNewShipmentData({
+                            ...newShipmentData,
+                            productImage:
+                              'https://images.unsplash.com/photo-1595777457583-95e059d581b8?auto=format&fit=crop&w=600&q=80',
+                          })
+                        }
+                        className="px-2 py-0.5 rounded bg-slate-200 text-slate-700 text-[10px] hover:bg-orange-100"
+                      >
+                        Thời trang đầm
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* PACKAGE & CHARGES */}
+              <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200">
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div className="sm:col-span-2">
-                    <label className="block font-semibold text-slate-700 mb-1">Tên mặt hàng / Nội dung bưu gửi</label>
+                    <label className="block font-semibold text-slate-700 mb-0.5">Tên mặt hàng</label>
                     <input
                       type="text"
                       value={newShipmentData.packageName}
                       onChange={(e) => setNewShipmentData({ ...newShipmentData, packageName: e.target.value })}
-                      placeholder="VD: Quần áo thể thao, Giày dép..."
-                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-orange-500 focus:outline-hidden"
+                      placeholder="VD: Quần áo thể thao, Đồng hồ..."
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs"
                     />
                   </div>
                   <div>
-                    <label className="block font-semibold text-slate-700 mb-1">Khối lượng (kg)</label>
+                    <label className="block font-semibold text-slate-700 mb-0.5">Khối lượng (kg)</label>
                     <input
                       type="number"
                       step="0.1"
                       value={newShipmentData.weightKg}
                       onChange={(e) => setNewShipmentData({ ...newShipmentData, weightKg: parseFloat(e.target.value) || 0 })}
-                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-orange-500 focus:outline-hidden"
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs"
                     />
                   </div>
-
                   <div>
-                    <label className="block font-semibold text-slate-700 mb-1">Tiền thu hộ COD (VNĐ)</label>
+                    <label className="block font-semibold text-slate-700 mb-0.5">Tiền thu hộ COD (VNĐ)</label>
                     <input
                       type="number"
                       step="1000"
                       value={newShipmentData.codAmount}
                       onChange={(e) => setNewShipmentData({ ...newShipmentData, codAmount: parseInt(e.target.value, 10) || 0 })}
-                      placeholder="0"
-                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-mono font-bold text-orange-600 focus:ring-2 focus:ring-orange-500 focus:outline-hidden"
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-mono font-bold text-orange-600"
                     />
                   </div>
-
                   <div>
-                    <label className="block font-semibold text-slate-700 mb-1">Cước vận chuyển (VNĐ)</label>
+                    <label className="block font-semibold text-slate-700 mb-0.5">Cước phí (VNĐ)</label>
                     <input
                       type="number"
                       step="1000"
                       value={newShipmentData.shippingFee}
                       onChange={(e) => setNewShipmentData({ ...newShipmentData, shippingFee: parseInt(e.target.value, 10) || 0 })}
-                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-mono font-bold text-slate-800 focus:ring-2 focus:ring-orange-500 focus:outline-hidden"
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-mono font-bold text-slate-800"
                     />
                   </div>
-
                   <div>
-                    <label className="block font-semibold text-slate-700 mb-1">Trạng thái khởi tạo</label>
+                    <label className="block font-semibold text-slate-700 mb-0.5">Trạng thái khởi tạo</label>
                     <select
                       value={newShipmentData.currentStatus}
                       onChange={(e) =>
@@ -947,7 +1133,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                           currentStatus: e.target.value as ShipmentStatus,
                         })
                       }
-                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-semibold focus:ring-2 focus:ring-orange-500 focus:outline-hidden"
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-semibold"
                     >
                       <option value="PENDING_PICKUP">Chờ lấy hàng</option>
                       <option value="PICKED_UP">Đã lấy hàng & Nhập kho</option>
@@ -964,16 +1150,16 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                 <button
                   type="button"
                   onClick={() => setIsCreateModalOpen(false)}
-                  className="px-5 py-2.5 rounded-xl border border-slate-300 text-slate-700 font-semibold hover:bg-slate-100 transition-colors"
+                  className="px-5 py-2 rounded-xl border border-slate-300 text-slate-700 font-semibold hover:bg-slate-100"
                 >
                   Hủy bỏ
                 </button>
                 <button
                   type="submit"
-                  className="px-6 py-2.5 bg-orange-600 hover:bg-orange-700 text-white font-bold rounded-xl shadow-lg shadow-orange-600/30 transition-all flex items-center gap-1.5"
+                  className="px-6 py-2 bg-orange-600 hover:bg-orange-700 text-white font-bold rounded-xl shadow-md flex items-center gap-1.5"
                 >
                   <Save className="w-4 h-4" />
-                  Lưu & Đưa Vào Vận Hành
+                  Lưu & Tự Động Định Tuyến
                 </button>
               </div>
             </form>
@@ -981,14 +1167,14 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         </div>
       )}
 
-      {/* ===================== MODAL: CHỈNH SỬA CHI TIẾT & HÀNH TRÌNH ===================== */}
+      {/* ===================== MODAL: CHỈNH SỬA CHI TIẾT (CÓ ẢNH & AUTO BƯU CỤC) ===================== */}
       {editingShipment && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 overflow-y-auto">
-          <div className="bg-white rounded-3xl shadow-2xl max-w-4xl w-full p-6 md:p-8 my-8 relative max-h-[90vh] overflow-y-auto">
+          <div className="bg-white rounded-3xl shadow-2xl max-w-4xl w-full p-6 md:p-8 my-8 relative max-h-[92vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-4 border-b border-slate-100">
               <div>
                 <span className="text-[11px] font-bold text-orange-600 uppercase tracking-widest block">
-                  Chỉnh Sửa Vận Đơn
+                  Chỉnh Sửa Vận Đơn & Cập Nhật Supabase
                 </span>
                 <h3 className="font-mono font-black text-slate-900 text-xl tracking-wider">
                   {editingShipment.trackingCode}
@@ -1002,13 +1188,12 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
               </button>
             </div>
 
-            {/* Edit Shipment Form */}
-            <form onSubmit={handleEditShipmentSave} className="mt-5 space-y-5 text-xs">
-              {/* Quick Status and Basic properties */}
-              <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200">
+            <form onSubmit={handleEditShipmentSave} className="mt-4 space-y-4 text-xs">
+              {/* Status and Estimated Delivery */}
+              <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200">
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div>
-                    <label className="block font-bold text-slate-700 mb-1">Trạng thái vận đơn hiện thời</label>
+                    <label className="block font-bold text-slate-700 mb-1">Trạng thái vận đơn</label>
                     <select
                       value={editingShipment.currentStatus}
                       onChange={(e) =>
@@ -1017,14 +1202,14 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                           currentStatus: e.target.value as ShipmentStatus,
                         })
                       }
-                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl font-bold text-slate-900 focus:ring-2 focus:ring-orange-500 focus:outline-hidden"
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl font-bold text-slate-900"
                     >
                       <option value="PENDING_PICKUP">Chờ lấy hàng</option>
                       <option value="PICKED_UP">Đã lấy hàng & Nhập kho</option>
                       <option value="IN_TRANSIT">Đang trung chuyển liên tỉnh</option>
-                      <option value="OUT_FOR_DELIVERY">Đang phát hàng (Bưu tá giao)</option>
+                      <option value="OUT_FOR_DELIVERY">Đang phát hàng (Bưu tá)</option>
                       <option value="DELIVERED">Giao hàng thành công</option>
-                      <option value="FAILED_ATTEMPT">Giao không thành công (Hẹn lại)</option>
+                      <option value="FAILED_ATTEMPT">Giao không thành công</option>
                       <option value="RETURNED">Đang chuyển hoàn</option>
                       <option value="CANCELLED">Đã hủy đơn</option>
                     </select>
@@ -1041,8 +1226,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                           estimatedDelivery: e.target.value,
                         })
                       }
-                      placeholder="VD: 2026-10-25 18:00:00"
-                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl focus:ring-2 focus:ring-orange-500 focus:outline-hidden"
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl"
                     />
                   </div>
 
@@ -1058,251 +1242,216 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                           codAmount: parseInt(e.target.value, 10) || 0,
                         })
                       }
-                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl font-mono font-bold text-orange-600 focus:ring-2 focus:ring-orange-500 focus:outline-hidden"
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl font-mono font-bold text-orange-600"
                     />
                   </div>
                 </div>
               </div>
 
-              {/* SENDER & RECEIVER EDIT */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {/* Sender */}
-                <div className="border border-blue-200 bg-blue-50/40 p-4 rounded-2xl space-y-2">
-                  <span className="font-bold text-blue-900 uppercase block mb-1">
-                    Người Gửi (Từ địa chỉ...)
-                  </span>
-                  <div>
-                    <label className="text-[11px] text-slate-600 font-semibold block">Họ tên người gửi:</label>
+              {/* Product Image Update */}
+              <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200">
+                <span className="font-bold text-slate-800 text-xs uppercase flex items-center gap-1.5 mb-2">
+                  <ImageIcon className="w-4 h-4 text-orange-600" />
+                  Ảnh Sản Phẩm Bưu Kiện (Khách hàng sẽ nhìn thấy khi tra cứu)
+                </span>
+                <div className="flex flex-col sm:flex-row items-center gap-3">
+                  {editingShipment.productImage ? (
+                    <div className="relative w-20 h-20 rounded-xl overflow-hidden border-2 border-orange-500 shrink-0">
+                      <img
+                        src={editingShipment.productImage}
+                        alt="Product"
+                        className="w-full h-full object-cover"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setEditingShipment({ ...editingShipment, productImage: '' })}
+                        className="absolute top-1 right-1 p-0.5 rounded-full bg-black/70 text-white"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="w-20 h-20 rounded-xl border-2 border-dashed border-slate-300 flex items-center justify-center text-slate-400 shrink-0 bg-white">
+                      <ImageIcon className="w-5 h-5" />
+                    </div>
+                  )}
+                  <div className="flex-1 w-full space-y-1.5">
                     <input
-                      type="text"
-                      value={editingShipment.senderName}
-                      onChange={(e) => setEditingShipment({ ...editingShipment, senderName: e.target.value })}
-                      className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs"
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) => handleImageFileUpload(e, 'edit')}
+                      className="w-full text-xs text-slate-500 file:mr-2 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:text-xs file:bg-orange-50 file:text-orange-700"
                     />
-                  </div>
-                  <div>
-                    <label className="text-[11px] text-slate-600 font-semibold block">SĐT người gửi:</label>
                     <input
                       type="text"
-                      value={editingShipment.senderPhone}
-                      onChange={(e) => setEditingShipment({ ...editingShipment, senderPhone: e.target.value })}
-                      className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[11px] text-slate-600 font-semibold block">Từ địa chỉ chi tiết:</label>
-                    <input
-                      type="text"
-                      value={editingShipment.senderAddress}
-                      onChange={(e) => setEditingShipment({ ...editingShipment, senderAddress: e.target.value })}
-                      className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[11px] text-slate-600 font-semibold block">Tỉnh/TP gửi:</label>
-                    <input
-                      type="text"
-                      value={editingShipment.senderCity}
-                      onChange={(e) => setEditingShipment({ ...editingShipment, senderCity: e.target.value })}
-                      className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs"
-                    />
-                  </div>
-                </div>
-
-                {/* Receiver */}
-                <div className="border border-orange-200 bg-orange-50/40 p-4 rounded-2xl space-y-2">
-                  <span className="font-bold text-orange-900 uppercase block mb-1">
-                    Người Nhận (Giao đến địa chỉ...)
-                  </span>
-                  <div>
-                    <label className="text-[11px] text-slate-600 font-semibold block">Họ tên người nhận:</label>
-                    <input
-                      type="text"
-                      value={editingShipment.receiverName}
-                      onChange={(e) => setEditingShipment({ ...editingShipment, receiverName: e.target.value })}
-                      className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[11px] text-slate-600 font-semibold block">SĐT người nhận:</label>
-                    <input
-                      type="text"
-                      value={editingShipment.receiverPhone}
-                      onChange={(e) => setEditingShipment({ ...editingShipment, receiverPhone: e.target.value })}
-                      className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[11px] text-slate-600 font-semibold block">Giao đến địa chỉ chi tiết:</label>
-                    <input
-                      type="text"
-                      value={editingShipment.receiverAddress}
-                      onChange={(e) => setEditingShipment({ ...editingShipment, receiverAddress: e.target.value })}
-                      className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[11px] text-slate-600 font-semibold block">Tỉnh/TP nhận:</label>
-                    <input
-                      type="text"
-                      value={editingShipment.receiverCity}
-                      onChange={(e) => setEditingShipment({ ...editingShipment, receiverCity: e.target.value })}
+                      placeholder="Hoặc dán URL ảnh trực tiếp..."
+                      value={editingShipment.productImage || ''}
+                      onChange={(e) => setEditingShipment({ ...editingShipment, productImage: e.target.value })}
                       className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs"
                     />
                   </div>
                 </div>
               </div>
 
-              {/* Package Name & Notes */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-slate-50 p-4 rounded-2xl border border-slate-200">
+              {/* Sender & Receiver Address Details */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="border border-blue-200 bg-blue-50/40 p-3.5 rounded-2xl space-y-2">
+                  <span className="font-bold text-blue-900 uppercase block">1. Người Gửi (Từ địa chỉ...)</span>
+                  <input
+                    type="text"
+                    value={editingShipment.senderName}
+                    onChange={(e) => setEditingShipment({ ...editingShipment, senderName: e.target.value })}
+                    className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs"
+                  />
+                  <input
+                    type="text"
+                    value={editingShipment.senderPhone}
+                    onChange={(e) => setEditingShipment({ ...editingShipment, senderPhone: e.target.value })}
+                    className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono"
+                  />
+                  <input
+                    type="text"
+                    value={editingShipment.senderAddress}
+                    onChange={(e) => setEditingShipment({ ...editingShipment, senderAddress: e.target.value })}
+                    className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs"
+                  />
+                  <input
+                    type="text"
+                    value={editingShipment.senderCity}
+                    onChange={(e) => setEditingShipment({ ...editingShipment, senderCity: e.target.value })}
+                    className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs"
+                  />
+                </div>
+
+                <div className="border border-orange-200 bg-orange-50/40 p-3.5 rounded-2xl space-y-2">
+                  <span className="font-bold text-orange-900 uppercase block">2. Người Nhận (Giao đến địa chỉ...)</span>
+                  <input
+                    type="text"
+                    value={editingShipment.receiverName}
+                    onChange={(e) => setEditingShipment({ ...editingShipment, receiverName: e.target.value })}
+                    className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs"
+                  />
+                  <input
+                    type="text"
+                    value={editingShipment.receiverPhone}
+                    onChange={(e) => setEditingShipment({ ...editingShipment, receiverPhone: e.target.value })}
+                    className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono"
+                  />
+                  <input
+                    type="text"
+                    value={editingShipment.receiverAddress}
+                    onChange={(e) => setEditingShipment({ ...editingShipment, receiverAddress: e.target.value })}
+                    className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs"
+                  />
+                  <input
+                    type="text"
+                    value={editingShipment.receiverCity}
+                    onChange={(e) => setEditingShipment({ ...editingShipment, receiverCity: e.target.value })}
+                    className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs"
+                  />
+                </div>
+              </div>
+
+              {/* Package Specs */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-slate-50 p-3.5 rounded-2xl border border-slate-200">
                 <div>
-                  <label className="font-semibold text-slate-700 block mb-1">Tên hàng hóa bưu kiện:</label>
+                  <label className="font-semibold text-slate-700 block mb-0.5">Tên hàng hóa:</label>
                   <input
                     type="text"
                     value={editingShipment.packageName}
                     onChange={(e) => setEditingShipment({ ...editingShipment, packageName: e.target.value })}
-                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs"
+                    className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs"
                   />
                 </div>
                 <div>
-                  <label className="font-semibold text-slate-700 block mb-1">Ghi chú giao hàng:</label>
+                  <label className="font-semibold text-slate-700 block mb-0.5">Ghi chú giao hàng:</label>
                   <input
                     type="text"
                     value={editingShipment.notes || ''}
                     onChange={(e) => setEditingShipment({ ...editingShipment, notes: e.target.value })}
-                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs"
+                    className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs"
                   />
                 </div>
               </div>
 
               {/* TIMELINE / MILESTONES MANAGER */}
-              <div className="border border-slate-300 rounded-2xl p-4 sm:p-5 bg-white">
-                <div className="flex items-center justify-between pb-3 border-b border-slate-200 mb-4">
+              <div className="border border-slate-300 rounded-2xl p-4 bg-white">
+                <div className="flex items-center justify-between pb-2.5 border-b border-slate-200 mb-3">
                   <div className="flex items-center gap-2">
                     <Clock className="w-4 h-4 text-orange-600" />
-                    <h4 className="font-bold text-slate-900 text-sm">
-                      Lịch Trình Di Chuyển Của Bưu Kiện ({editingShipment.timeline.length} mốc)
+                    <h4 className="font-bold text-slate-900 text-xs sm:text-sm">
+                      Lịch Trình Vận Chuyển ({editingShipment.timeline.length} mốc)
                     </h4>
                   </div>
-                  <span className="text-[11px] text-slate-500">Mốc mới nhất nằm ở trên cùng</span>
+                  <span className="text-[10px] text-slate-400">Mốc mới nhất nằm ở trên cùng</span>
                 </div>
 
-                {/* Add new milestone sub-form */}
-                <div className="bg-orange-50/50 p-3.5 rounded-xl border border-orange-200 mb-4 space-y-2.5">
-                  <span className="font-bold text-orange-950 text-xs block">
-                    + Thêm một mốc hành trình / trạm trung chuyển mới:
+                {/* Quick Add Milestone Sub-form */}
+                <div className="bg-orange-50/50 p-3 rounded-xl border border-orange-200 mb-3 space-y-2">
+                  <span className="font-bold text-orange-950 text-[11px] block">
+                    + Thêm mốc hành trình thủ công nếu muốn:
                   </span>
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                    <div>
-                      <label className="text-[10px] text-slate-600 font-bold block mb-0.5">Tiêu đề mốc:</label>
-                      <input
-                        type="text"
-                        value={milestoneTitle}
-                        onChange={(e) => setMilestoneTitle(e.target.value)}
-                        placeholder="VD: Đã đến kho trung chuyển"
-                        className="w-full px-2 py-1.5 bg-white border border-slate-300 rounded-lg text-xs"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-[10px] text-slate-600 font-bold block mb-0.5">Địa điểm trạm bưu cục:</label>
-                      <input
-                        type="text"
-                        value={milestoneLocation}
-                        onChange={(e) => setMilestoneLocation(e.target.value)}
-                        placeholder="VD: Kho Củ Chi SOC, TP.HCM"
-                        className="w-full px-2 py-1.5 bg-white border border-slate-300 rounded-lg text-xs"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-[10px] text-slate-600 font-bold block mb-0.5">Trạng thái gắn kèm:</label>
-                      <select
-                        value={milestoneStatus}
-                        onChange={(e) => setMilestoneStatus(e.target.value as ShipmentStatus)}
-                        className="w-full px-2 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-semibold"
-                      >
-                        <option value="PICKED_UP">Đã lấy hàng</option>
-                        <option value="IN_TRANSIT">Đang trung chuyển</option>
-                        <option value="OUT_FOR_DELIVERY">Đang giao hàng</option>
-                        <option value="DELIVERED">Giao thành công</option>
-                        <option value="FAILED_ATTEMPT">Giao không thành công</option>
-                      </select>
-                    </div>
+                    <input
+                      type="text"
+                      value={milestoneTitle}
+                      onChange={(e) => setMilestoneTitle(e.target.value)}
+                      placeholder="Tiêu đề mốc..."
+                      className="px-2 py-1 bg-white border border-slate-300 rounded-lg text-xs"
+                    />
+                    <input
+                      type="text"
+                      value={milestoneLocation}
+                      onChange={(e) => setMilestoneLocation(e.target.value)}
+                      placeholder="Địa điểm bưu cục..."
+                      className="px-2 py-1 bg-white border border-slate-300 rounded-lg text-xs"
+                    />
+                    <select
+                      value={milestoneStatus}
+                      onChange={(e) => setMilestoneStatus(e.target.value as ShipmentStatus)}
+                      className="px-2 py-1 bg-white border border-slate-300 rounded-lg text-xs font-semibold"
+                    >
+                      <option value="PICKED_UP">Đã lấy hàng</option>
+                      <option value="IN_TRANSIT">Đang trung chuyển</option>
+                      <option value="OUT_FOR_DELIVERY">Đang giao hàng</option>
+                      <option value="DELIVERED">Giao thành công</option>
+                      <option value="FAILED_ATTEMPT">Giao không thành công</option>
+                    </select>
                   </div>
-
-                  <div>
-                    <label className="text-[10px] text-slate-600 font-bold block mb-0.5">Mô tả hành trình chi tiết:</label>
+                  <div className="flex items-center gap-2">
                     <input
                       type="text"
                       value={milestoneDesc}
                       onChange={(e) => setMilestoneDesc(e.target.value)}
-                      placeholder="VD: Kiện hàng đang được phân tuyến tự động..."
-                      className="w-full px-2 py-1.5 bg-white border border-slate-300 rounded-lg text-xs"
+                      placeholder="Mô tả bưu kiện..."
+                      className="flex-1 px-2 py-1 bg-white border border-slate-300 rounded-lg text-xs"
                     />
-                  </div>
-
-                  {milestoneStatus === 'OUT_FOR_DELIVERY' && (
-                    <div className="grid grid-cols-2 gap-2 pt-1 border-t border-orange-200">
-                      <div>
-                        <label className="text-[10px] text-slate-600 font-bold block mb-0.5">Tên bưu tá (Shipper):</label>
-                        <input
-                          type="text"
-                          value={milestoneShipperName}
-                          onChange={(e) => setMilestoneShipperName(e.target.value)}
-                          placeholder="VD: Trần Văn Nam"
-                          className="w-full px-2 py-1.5 bg-white border border-slate-300 rounded-lg text-xs"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-[10px] text-slate-600 font-bold block mb-0.5">SĐT bưu tá:</label>
-                        <input
-                          type="text"
-                          value={milestoneShipperPhone}
-                          onChange={(e) => setMilestoneShipperPhone(e.target.value)}
-                          placeholder="VD: 0912 345 678"
-                          className="w-full px-2 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono"
-                        />
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="text-right pt-1">
                     <button
                       type="button"
                       onClick={handleAddMilestoneToEdited}
-                      className="px-3 py-1.5 bg-orange-600 hover:bg-orange-700 text-white font-bold text-xs rounded-lg transition-colors cursor-pointer"
+                      className="px-3 py-1 bg-orange-600 hover:bg-orange-700 text-white font-bold text-xs rounded-lg shrink-0"
                     >
-                      + Lưu Thêm Mốc Này
+                      + Lưu mốc
                     </button>
                   </div>
                 </div>
 
                 {/* Timeline list */}
-                <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
                   {editingShipment.timeline.map((evt, idx) => (
                     <div
                       key={evt.id || idx}
-                      className="p-2.5 rounded-xl border border-slate-200 bg-slate-50 flex items-start justify-between gap-3 text-xs"
+                      className="p-2 rounded-lg border border-slate-200 bg-slate-50 flex items-start justify-between gap-2 text-xs"
                     >
-                      <div className="flex-1">
-                        <div className="flex items-center gap-2">
-                          <span className="font-bold text-slate-900">{evt.title}</span>
-                          <span className="text-[10px] text-slate-400 font-mono">({evt.timestamp})</span>
-                        </div>
-                        <p className="text-slate-600 text-[11px] font-medium mt-0.5">
-                          📍 {evt.location}
-                        </p>
-                        <p className="text-slate-500 text-[11px] mt-0.5">{evt.description}</p>
-                        {evt.shipperName && (
-                          <span className="inline-block mt-1 text-[10px] bg-white px-2 py-0.5 rounded border border-slate-200 text-orange-700 font-semibold">
-                            Bưu tá: {evt.shipperName} ({evt.shipperPhone})
-                          </span>
-                        )}
+                      <div className="flex-1 min-w-0">
+                        <span className="font-bold text-slate-900">{evt.title}</span>
+                        <span className="text-[10px] text-slate-400 font-mono ml-2">({evt.timestamp})</span>
+                        <p className="text-slate-600 text-[11px] truncate">📍 {evt.location}</p>
                       </div>
-
                       <button
                         type="button"
                         onClick={() => handleDeleteMilestone(evt.id)}
-                        className="text-rose-500 hover:text-rose-700 p-1 hover:bg-rose-50 rounded"
+                        className="text-rose-500 hover:text-rose-700 p-1"
                         title="Xóa mốc này"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
@@ -1313,27 +1462,27 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
               </div>
 
               {/* Action buttons */}
-              <div className="flex items-center justify-between pt-4 border-t border-slate-200">
+              <div className="flex items-center justify-between pt-3 border-t border-slate-200">
                 <button
                   type="button"
                   onClick={() => onGoToCustomerTracking(editingShipment.trackingCode)}
-                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-xl text-xs flex items-center gap-1.5 transition-colors"
+                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-xl text-xs flex items-center gap-1.5"
                 >
                   <Eye className="w-4 h-4 text-orange-600" />
-                  Xem thử trên trang khách hàng
+                  Xem trang khách hàng
                 </button>
 
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
                     onClick={() => setEditingShipment(null)}
-                    className="px-4 py-2 border border-slate-300 rounded-xl text-slate-700 font-semibold hover:bg-slate-100 transition-colors"
+                    className="px-4 py-2 border border-slate-300 rounded-xl text-slate-700 font-semibold hover:bg-slate-100"
                   >
                     Đóng
                   </button>
                   <button
                     type="submit"
-                    className="px-5 py-2 bg-orange-600 hover:bg-orange-700 text-white font-bold rounded-xl shadow-md transition-colors flex items-center gap-1.5"
+                    className="px-5 py-2 bg-orange-600 hover:bg-orange-700 text-white font-bold rounded-xl shadow-md flex items-center gap-1.5"
                   >
                     <Save className="w-4 h-4" />
                     Lưu Thay Đổi
@@ -1341,6 +1490,139 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                 </div>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* ===================== MODAL: KẾT NỐI SUPABASE CLOUD SYNC ===================== */}
+      {isSupabaseModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 overflow-y-auto">
+          <div className="bg-white rounded-3xl shadow-2xl max-w-2xl w-full p-6 md:p-8 my-8 relative max-h-[92vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-emerald-600 text-white flex items-center justify-center font-bold">
+                  <Database className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-slate-900 text-base sm:text-lg">
+                    Quản Lý Cơ Sở Dữ Liệu Supabase
+                  </h3>
+                  <p className="text-xs text-slate-500">Mọi chỉnh sửa và xóa mã sẽ đồng bộ trực tiếp lên Supabase</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsSupabaseModalOpen(false)}
+                className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="mt-4 space-y-4 text-xs">
+              {supabaseStatusMsg && (
+                <div
+                  className={`p-3 rounded-xl border text-xs font-semibold flex items-center gap-2 ${
+                    supabaseStatusMsg.includes('thành công')
+                      ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                      : 'bg-amber-50 text-amber-800 border-amber-300'
+                  }`}
+                >
+                  <CheckCircle className="w-4 h-4 shrink-0" />
+                  <span>{supabaseStatusMsg}</span>
+                </div>
+              )}
+
+              <div className="space-y-3 bg-slate-50 p-4 rounded-2xl border border-slate-200">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">
+                    Supabase Project URL:
+                  </label>
+                  <input
+                    type="text"
+                    value={supabaseConfig.url}
+                    onChange={(e) => setSupabaseConfig({ ...supabaseConfig, url: e.target.value.trim() })}
+                    placeholder="https://xyzcompany.supabase.co"
+                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl font-mono text-xs focus:ring-2 focus:ring-emerald-500 focus:outline-hidden"
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">
+                    Supabase Anon Key:
+                  </label>
+                  <input
+                    type="password"
+                    value={supabaseConfig.anonKey}
+                    onChange={(e) => setSupabaseConfig({ ...supabaseConfig, anonKey: e.target.value.trim() })}
+                    placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl font-mono text-xs focus:ring-2 focus:ring-emerald-500 focus:outline-hidden"
+                  />
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    disabled={isTestingSupabase}
+                    onClick={handleTestSupabase}
+                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl flex items-center gap-1.5 transition-colors"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isTestingSupabase ? 'animate-spin' : ''}`} />
+                    Kiểm Tra Kết Nối & Lưu Cấu Hình
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={isTestingSupabase}
+                    onClick={handleSyncAllToSupabase}
+                    className="px-3.5 py-2 bg-slate-200 hover:bg-slate-300 text-slate-800 font-semibold rounded-xl flex items-center gap-1.5 transition-colors"
+                  >
+                    <Upload className="w-3.5 h-3.5 text-emerald-600" />
+                    Đồng bộ toàn bộ dữ liệu lên Supabase
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={isTestingSupabase}
+                    onClick={handlePullFromSupabase}
+                    className="px-3.5 py-2 bg-slate-200 hover:bg-slate-300 text-slate-800 font-semibold rounded-xl flex items-center gap-1.5 transition-colors"
+                  >
+                    Tải dữ liệu từ Supabase về
+                  </button>
+                </div>
+              </div>
+
+              {/* SQL Setup Helper */}
+              <div className="border border-slate-200 rounded-2xl p-4 bg-slate-950 text-slate-300 font-mono text-[11px]">
+                <div className="flex items-center justify-between pb-2 border-b border-slate-800 mb-2">
+                  <span className="text-emerald-400 font-bold">Lệnh SQL tạo bảng trong Supabase (Chạy 1 lần):</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(SUPABASE_SQL_HELPER);
+                      setCopiedSql(true);
+                      setTimeout(() => setCopiedSql(false), 2000);
+                    }}
+                    className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 flex items-center gap-1 text-[10px]"
+                  >
+                    {copiedSql ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                    {copiedSql ? 'Đã sao chép' : 'Sao chép SQL'}
+                  </button>
+                </div>
+                <pre className="overflow-x-auto text-slate-400 leading-relaxed max-h-36">
+                  {SUPABASE_SQL_HELPER}
+                </pre>
+              </div>
+
+              <div className="text-right pt-2 border-t border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => setIsSupabaseModalOpen(false)}
+                  className="px-5 py-2 bg-slate-900 text-white font-bold rounded-xl"
+                >
+                  Đóng
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

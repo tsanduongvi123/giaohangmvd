@@ -13,6 +13,7 @@ export const INITIAL_SHIPMENTS: Shipment[] = [
     receiverAddress: 'Số 48 Ngõ 165 Cầu Giấy, Phường Dịch Vọng, Quận Cầu Giấy',
     receiverCity: 'Hà Nội',
     packageName: 'Điện thoại Smartphone Flagship Pro Max + Phụ kiện sạc nhanh 65W',
+    productImage: 'https://images.unsplash.com/photo-1592750475338-74b7b21085ab?auto=format&fit=crop&w=600&q=80',
     weightKg: 0.85,
     dimensions: '20 x 12 x 8 cm',
     codAmount: 18500000,
@@ -80,6 +81,7 @@ export const INITIAL_SHIPMENTS: Shipment[] = [
     receiverAddress: 'Căn hộ B-1402, Chung cư Masteri Thảo Điền, 159 Xa Lộ Hà Nội, P. Thảo Điền',
     receiverCity: 'TP. Thủ Đức, TP. Hồ Chí Minh',
     packageName: 'Bộ đầm thiết kế lụa tơ tằm cao cấp + Hộp quà tặng',
+    productImage: 'https://images.unsplash.com/photo-1595777457583-95e059d581b8?auto=format&fit=crop&w=600&q=80',
     weightKg: 1.2,
     dimensions: '35 x 25 x 10 cm',
     codAmount: 0,
@@ -149,6 +151,7 @@ export const INITIAL_SHIPMENTS: Shipment[] = [
     receiverAddress: 'Số 154 Đường Trần Phú, Phường Hồng Sơn, TP. Vinh',
     receiverCity: 'Nghệ An',
     packageName: 'Kiện hàng thực phẩm bảo vệ sức khỏe & Dụng cụ y tế đạt chuẩn GSP',
+    productImage: 'https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?auto=format&fit=crop&w=600&q=80',
     weightKg: 5.4,
     dimensions: '40 x 30 x 25 cm',
     codAmount: 4320000,
@@ -198,6 +201,7 @@ export const INITIAL_SHIPMENTS: Shipment[] = [
     receiverAddress: 'Khu Đô Thị Ecopark, Xã Xuân Quan, Huyện Văn Giang',
     receiverCity: 'Hưng Yên',
     packageName: 'Giày Thể Thao Sneaker Size 42 + Tất vớ dệt kim cao cấp',
+    productImage: 'https://images.unsplash.com/photo-1542291026-7eec264c27ff?auto=format&fit=crop&w=600&q=80',
     weightKg: 1.1,
     dimensions: '32 x 20 x 14 cm',
     codAmount: 1250000,
@@ -221,7 +225,7 @@ export const INITIAL_SHIPMENTS: Shipment[] = [
   },
 ];
 
-const STORAGE_KEY = 'express_logistics_shipments_db_v4';
+const STORAGE_KEY = 'express_logistics_shipments_db_v6';
 
 export function getStoredShipments(): Shipment[] {
   try {

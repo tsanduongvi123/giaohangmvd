@@ -1,12 +1,33 @@
 import React, { useState, useEffect } from 'react';
 import { Shipment } from './types';
 import { getStoredShipments, saveStoredShipments, INITIAL_SHIPMENTS } from './data/defaultShipments';
+import { fetchShipmentsFromSupabase, upsertShipmentToSupabase } from './services/supabase';
 import { TrackingView } from './components/TrackingView';
 import { AdminPortal } from './components/AdminPortal';
 
 export default function App() {
   const [shipments, setShipments] = useState<Shipment[]>(() => getStoredShipments());
   const [targetTrackingCode, setTargetTrackingCode] = useState<string>('');
+
+  // Initial cloud sync from Supabase if configured
+  useEffect(() => {
+    let isMounted = true;
+    async function loadCloudShipments() {
+      try {
+        const cloudData = await fetchShipmentsFromSupabase();
+        if (cloudData && cloudData.length > 0 && isMounted) {
+          setShipments(cloudData);
+          saveStoredShipments(cloudData);
+        }
+      } catch (err) {
+        console.warn('Auto Supabase sync notice:', err);
+      }
+    }
+    loadCloudShipments();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   // Check if current path or hash matches /adminquanly
   const checkIsAdminRoute = () => {
