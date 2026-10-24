@@ -992,7 +992,7 @@ export const TrackingView: React.FC<TrackingViewProps> = ({
             <div>
               <h4 className="text-white font-bold text-xs uppercase mb-3">Hỗ Trợ Khách Hàng</h4>
               <div className="text-orange-400 font-mono font-bold text-lg mb-1">
-                1900 0000
+                1900 6888
               </div>
               <p className="text-slate-400 text-xs mb-2">Thời gian làm việc: 24/7 toàn quốc</p>
               <p className="text-slate-500 text-[11px]">Email hỗ trợ: cskh@expresslogistics.vn</p>
